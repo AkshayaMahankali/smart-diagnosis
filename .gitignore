@@ -1,7 +1,0 @@
-__pycache__/
-*.pyc
-.DS_Store
-.vscode/
-uploads/
-backend/
-vgg16_best.h5

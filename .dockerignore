@@ -1,9 +1,0 @@
-__pycache__/
-*.pyc
-*.pyo
-*.pyd
-.env
-.git
-.gitignore
-uploads/
-vgg16_best.h5

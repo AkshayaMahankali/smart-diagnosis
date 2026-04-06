@@ -1,35 +1,27 @@
-# app.py
-from flask import Flask, render_template, request
+import gradio as gr
 import numpy as np
 import cv2
-from tensorflow.keras.models import load_model
-from tensorflow.keras.preprocessing import image
-from io import BytesIO
-import os
 import tensorflow as tf
-import base64
+from tensorflow.keras.models import load_model
+import os
+import gdown
 
-app = Flask(__name__)
+# ✅ Fix for Hugging Face issues
+os.environ["GRADIO_ANALYTICS_ENABLED"] = "False"
 
-# ------------------ MODEL ------------------
-model = None
+# ------------------ MODEL DOWNLOAD ------------------
+MODEL_PATH = "vgg16_best.h5"
+MODEL_URL = "https://drive.google.com/uc?id=1sq-Cz_Jvtyns3bxx8_kqdt8dfZDInZMr"
 
-def get_model():
-    global model
-    if model is None:
-        print("Loading model...")
-        model = load_model(MODEL_PATH)
-    return model
+if not os.path.exists(MODEL_PATH):
+    print("Downloading model...")
+    gdown.download(MODEL_URL, MODEL_PATH, quiet=False, fuzzy=True)
 
-def load_my_model():
-    if not os.path.exists(MODEL_PATH):
-        print("Downloading model ONCE...")
-        gdown.download(MODEL_URL, MODEL_PATH, quiet=False, fuzzy=True)
-    print("Loading model...")
-    return load_model(MODEL_PATH)
+# ------------------ LOAD MODEL ------------------
+print("Loading model...")
+model = load_model(MODEL_PATH)
 
-model = load_my_model()
-
+# ------------------ CLASS LABELS ------------------
 class_labels = [
     'adenocarcinoma',
     'large.cell.carcinoma',
@@ -46,16 +38,19 @@ def get_gradcam(img_array):
 
     with tf.GradientTape() as tape:
         conv_outputs, predictions = grad_model(img_array)
+        # Fix for list output
         if isinstance(predictions, list):
             predictions = predictions[0]
+
         pred_index = tf.argmax(predictions[0])
         loss = predictions[:, pred_index]
 
     grads = tape.gradient(loss, conv_outputs)
-    pooled_grads = tf.reduce_mean(grads, axis=(0,1,2))
-    conv_outputs = conv_outputs[0]
+    pooled_grads = tf.reduce_mean(grads, axis=(0, 1, 2))
 
+    conv_outputs = conv_outputs[0]
     heatmap = tf.reduce_sum(conv_outputs * pooled_grads, axis=-1)
+
     heatmap = tf.maximum(heatmap, 0)
     heatmap = heatmap / (tf.reduce_max(heatmap) + 1e-10)
 
@@ -67,6 +62,7 @@ def calculate_stage(heatmap):
 
     tumor_pixels = np.sum(heatmap > 0.5)
     total_pixels = heatmap.size
+
     coverage = (tumor_pixels / total_pixels) * 100
 
     if coverage <= 10:
@@ -80,84 +76,73 @@ def calculate_stage(heatmap):
 
     return round(coverage, 2), stage
 
-# ------------------ ROUTES ------------------
-@app.route('/')
-def home():
-    return render_template('welcome.html')
+# ------------------ PREDICTION FUNCTION ------------------
+def predict(img, patient_name, age, gender, smoking):
 
-@app.route('/analyze')
-def analyze():
-    return render_template('analyze.html')
+    if img is None:
+        return None, "No image uploaded", "", "", "", "", ""
 
-@app.route('/predict', methods=['POST'])
-def predict():
-    try:
-        file = request.files['scan']
+    # Resize & normalize
+    img_resized = cv2.resize(img, (224, 224))
+    arr = img_resized / 255.0
+    arr = np.expand_dims(arr, axis=0)
 
-        patient_name = request.form.get('patient_name')
-        age = request.form.get('age')
-        gender = request.form.get('gender')
-        smoking = request.form.get('smoking')
+    # Prediction
+    preds = model.predict(arr)[0]
+    idx = np.argmax(preds)
 
-        # ---------- Image processing ----------
-        img_bytes = file.read()
-        img = image.load_img(BytesIO(img_bytes), target_size=(224,224))
-        arr = image.img_to_array(img) / 255.0
-        arr = np.expand_dims(arr, axis=0)
+    label = class_labels[idx]
+    confidence = float(np.max(preds) * 100)
 
-        # ---------- Prediction ----------
-        model = get_model()
-        preds = model.predict(arr)[0]
-        idx = np.argmax(preds)
+    confidences = {
+        class_labels[i]: float(preds[i])
+        for i in range(len(class_labels))
+    }
 
-        label = class_labels[idx]
-        confidence = float(np.max(preds) * 100)
+    # Grad-CAM
+    heatmap = get_gradcam(arr)
 
-        confidences = {
-            class_labels[i]: float(preds[i])
-            for i in range(len(class_labels))
-        }
+    heatmap_resized = cv2.resize(heatmap, (img.shape[1], img.shape[0]))
+    coverage, stage = calculate_stage(heatmap_resized)
 
-        # ---------- Grad-CAM ----------
-        heatmap = get_gradcam(arr)
+    heatmap_uint8 = np.uint8(255 * heatmap_resized)
+    heatmap_color = cv2.applyColorMap(heatmap_uint8, cv2.COLORMAP_JET)
 
-        orig = cv2.cvtColor(np.array(img), cv2.COLOR_RGB2BGR)
-        heatmap_resized = cv2.resize(heatmap, (orig.shape[1], orig.shape[0]))
+    superimposed = cv2.addWeighted(img, 0.6, heatmap_color, 0.4, 0)
 
-        # Stage calculation
-        coverage, stage = calculate_stage(heatmap_resized)
+    # Format confidence text
+    confidence_text = f"{label} ({confidence:.2f}%)"
 
-        # ---------- Visualization ----------
-        heatmap_uint8 = np.uint8(255 * heatmap_resized)
-        heatmap_color = cv2.applyColorMap(heatmap_uint8, cv2.COLORMAP_JET)
-        superimposed = cv2.addWeighted(orig, 0.6, heatmap_color, 0.4, 0)
+    return (
+    superimposed,
+    confidence_text,
+    f"{coverage}%",
+    stage,
+    str(confidences)
+)
 
-        # ---------- Convert to base64 ----------
-        _, orig_buf = cv2.imencode('.png', orig)
-        _, heat_buf = cv2.imencode('.png', superimposed)
-
-        original_base64 = base64.b64encode(orig_buf).decode('utf-8')
-        gradcam_base64 = base64.b64encode(heat_buf).decode('utf-8')
-
-        return render_template(
-            'results.html',
-            prediction=label,
-            confidence=f"{confidence:.2f}%",
-            original=original_base64,
-            gradcam=gradcam_base64,
-            patient_name=patient_name,
-            age=age,
-            gender=gender,
-            smoking=smoking,
-            confidences=confidences,
-            coverage=f"{coverage}%",
-            stage=stage
-        )
-
-    except Exception as e:
-        return f"Error: {str(e)}", 500
+# ------------------ GRADIO UI ------------------
+interface = gr.Interface(
+    fn=predict,
+    inputs=[
+        gr.Image(type="numpy", label="Upload CT Scan"),
+        gr.Textbox(label="Patient Name"),
+        gr.Textbox(label="Age"),
+        gr.Radio(["Male", "Female"], label="Gender"),
+        gr.Radio(["Yes", "No"], label="Smoking")
+    ],
+    outputs=[
+        gr.Image(label="Grad-CAM Output"),
+        gr.Textbox(label="Prediction"),
+        gr.Textbox(label="Tumor Coverage"),
+        gr.Textbox(label="Cancer Stage"),
+        gr.Textbox(label="Class Probabilities"),
+    ],
+    title="🧠 Lung Cancer Detection System",
+    description="Upload CT scan to detect lung cancer type with Grad-CAM visualization and stage estimation"
+)
 
 # ------------------ RUN ------------------
-if __name__ == '__main__':
-    port = int(os.environ.get("PORT", 10000))
-    app.run(host='0.0.0.0', port=port)
+if __name__ == "__main__":
+    gr.utils.watchfn = lambda *args, **kwargs: None
+    interface.launch(server_name="0.0.0.0", server_port=7860)
