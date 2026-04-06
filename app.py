@@ -10,7 +10,7 @@ import gdown
 os.environ["GRADIO_ANALYTICS_ENABLED"] = "False"
 
 # ------------------ MODEL DOWNLOAD ------------------
-MODEL_PATH = "vgg16_best.h5"
+model = load_model(MODEL_PATH, compile=False)
 MODEL_URL = "https://drive.google.com/uc?id=1sq-Cz_Jvtyns3bxx8_kqdt8dfZDInZMr"
 
 if not os.path.exists(MODEL_PATH):
@@ -143,6 +143,13 @@ interface = gr.Interface(
 )
 
 # ------------------ RUN ------------------
+# ------------------ RUN ------------------
 if __name__ == "__main__":
+    # Disable Hugging Face hot reload bug
     gr.utils.watchfn = lambda *args, **kwargs: None
-    interface.launch(server_name="0.0.0.0", server_port=7860)
+
+    interface.launch(
+        server_name="0.0.0.0",
+        server_port=7860,
+        ssr_mode=False
+    )
